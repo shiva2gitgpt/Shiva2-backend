@@ -8,50 +8,26 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-/*
-==================================================
-SHIVA 2.0 — AI ROUTER
-Providers:
-1. Gemini
-2. Groq
-3. Mistral
-4. Qwen
-==================================================
-*/
-
-/* -----------------------------------------------
-   PROVIDER CONFIGURATION
------------------------------------------------- */
-
 const PROVIDERS = {
     gemini: {
         name: "Gemini",
         apiKey: process.env.GEMINI_API_KEY
     },
-
     groq: {
         name: "Groq",
         apiKey: process.env.GROQ_API_KEY
     },
-
     mistral: {
         name: "Mistral",
         apiKey: process.env.MISTRAL_API_KEY
     },
-
     qwen: {
         name: "Qwen",
         apiKey: process.env.QWEN_API_KEY
     }
 };
 
-
-/* -----------------------------------------------
-   CHECK PROVIDER
------------------------------------------------- */
-
 function checkProvider(provider) {
-
     if (!PROVIDERS[provider]) {
         return {
             valid: false,
@@ -66,55 +42,49 @@ function checkProvider(provider) {
         };
     }
 
-    return {
-        valid: true
-    };
+    return { valid: true };
 }
 
-
-/* -----------------------------------------------
+/* =========================
    GEMINI
------------------------------------------------- */
+   Current model:
+   gemini-3.8-flash
+   Interactions API
+========================= */
 
 async function callGemini(message) {
-
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    const url =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
-        apiKey;
-
-    const response = await fetch(url, {
-        method: "POST",
-
-        headers: {
-            "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify({
-            contents: [
-                {
-                    parts: [
-                        {
-                            text: message
-                        }
-                    ]
-                }
-            ]
-        })
-    });
+    const response = await fetch(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": process.env.GEMINI_API_KEY
+            },
+            body: JSON.stringify({
+                model: "gemini-3.8-flash",
+                input: message
+            })
+        }
+    );
 
     const data = await response.json();
 
     if (!response.ok) {
         throw new Error(
             data?.error?.message ||
+            data?.message ||
             "Gemini API request failed."
         );
     }
 
     const text =
-        data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        data?.outputs
+            ?.filter(item => item?.type === "text")
+            ?.map(item => item?.text)
+            ?.join("") ||
+        data?.output_text ||
+        "";
 
     if (!text) {
         throw new Error("Gemini returned an empty response.");
@@ -123,28 +93,23 @@ async function callGemini(message) {
     return text;
 }
 
-
-/* -----------------------------------------------
+/* =========================
    GROQ
------------------------------------------------- */
+   Current model:
+   openai/gpt-oss-120b
+========================= */
 
 async function callGroq(message) {
-
-    const apiKey = process.env.GROQ_API_KEY;
-
     const response = await fetch(
         "https://api.groq.com/openai/v1/chat/completions",
         {
             method: "POST",
-
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${apiKey}`
+                "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
             },
-
             body: JSON.stringify({
-                model: "llama-3.3-70b-versatile",
-
+                model: "openai/gpt-oss-120b",
                 messages: [
                     {
                         role: "user",
@@ -164,8 +129,7 @@ async function callGroq(message) {
         );
     }
 
-    const text =
-        data?.choices?.[0]?.message?.content;
+    const text = data?.choices?.[0]?.message?.content;
 
     if (!text) {
         throw new Error("Groq returned an empty response.");
@@ -174,28 +138,23 @@ async function callGroq(message) {
     return text;
 }
 
-
-/* -----------------------------------------------
+/* =========================
    MISTRAL
------------------------------------------------- */
+   Current model:
+   mistral-small-2603
+========================= */
 
 async function callMistral(message) {
-
-    const apiKey = process.env.MISTRAL_API_KEY;
-
     const response = await fetch(
         "https://api.mistral.ai/v1/chat/completions",
         {
             method: "POST",
-
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${apiKey}`
+                "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`
             },
-
             body: JSON.stringify({
-                model: "mistral-small-latest",
-
+                model: "mistral-small-2603",
                 messages: [
                     {
                         role: "user",
@@ -216,8 +175,7 @@ async function callMistral(message) {
         );
     }
 
-    const text =
-        data?.choices?.[0]?.message?.content;
+    const text = data?.choices?.[0]?.message?.content;
 
     if (!text) {
         throw new Error("Mistral returned an empty response.");
@@ -226,28 +184,26 @@ async function callMistral(message) {
     return text;
 }
 
-
-/* -----------------------------------------------
+/* =========================
    QWEN
------------------------------------------------- */
+   Current Singapore model:
+   qwen3.8-27b
+
+   Existing international endpoint
+   remains supported.
+========================= */
 
 async function callQwen(message) {
-
-    const apiKey = process.env.QWEN_API_KEY;
-
     const response = await fetch(
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
         {
             method: "POST",
-
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${apiKey}`
+                "Authorization": `Bearer ${process.env.QWEN_API_KEY}`
             },
-
             body: JSON.stringify({
-                model: "qwen-plus",
-
+                model: "qwen3.8-27b",
                 messages: [
                     {
                         role: "user",
@@ -263,12 +219,12 @@ async function callQwen(message) {
     if (!response.ok) {
         throw new Error(
             data?.error?.message ||
+            data?.message ||
             "Qwen API request failed."
         );
     }
 
-    const text =
-        data?.choices?.[0]?.message?.content;
+    const text = data?.choices?.[0]?.message?.content;
 
     if (!text) {
         throw new Error("Qwen returned an empty response.");
@@ -277,15 +233,12 @@ async function callQwen(message) {
     return text;
 }
 
-
-/* -----------------------------------------------
+/* =========================
    AI ROUTER
------------------------------------------------- */
+========================= */
 
 async function routeToAI(provider, message) {
-
     switch (provider) {
-
         case "gemini":
             return await callGemini(message);
 
@@ -305,19 +258,14 @@ async function routeToAI(provider, message) {
     }
 }
 
-
-/* -----------------------------------------------
-   GET STATUS
------------------------------------------------- */
+/* =========================
+   STATUS
+========================= */
 
 app.get("/api/status", (req, res) => {
-
     res.json({
         success: true,
-
-        message:
-            "Shiva 2.0 Backend + AI Router is working! 🚀",
-
+        message: "Shiva 2.0 Backend + AI Router is working! 🚀",
         providers: {
             gemini: !!process.env.GEMINI_API_KEY,
             groq: !!process.env.GROQ_API_KEY,
@@ -325,116 +273,83 @@ app.get("/api/status", (req, res) => {
             qwen: !!process.env.QWEN_API_KEY
         }
     });
-
 });
 
-
-/* -----------------------------------------------
-   POST MESSAGE
------------------------------------------------- */
+/* =========================
+   MESSAGE
+========================= */
 
 app.post("/api/message", async (req, res) => {
-
     try {
-
         const provider =
-            String(req.body.provider || "gemini")
-                .toLowerCase();
+            String(req.body.provider || "gemini").toLowerCase();
 
         const message =
             typeof req.body.message === "string"
                 ? req.body.message.trim()
                 : "";
 
-        /*
-        Backward compatibility with the
-        previous test API.
-        */
-
+        /* Preserve existing backend test */
         if (!message && req.body.name) {
-
             return res.json({
                 success: true,
-
                 message:
                     "Hello " +
                     req.body.name +
                     "! Backend received your data. 🚀"
             });
-
         }
 
-
         if (!message) {
-
             return res.status(400).json({
                 success: false,
                 error: "Message is required."
             });
-
         }
 
-
-        const providerCheck =
-            checkProvider(provider);
-
+        const providerCheck = checkProvider(provider);
 
         if (!providerCheck.valid) {
-
             return res.status(400).json({
                 success: false,
                 error: providerCheck.message
             });
-
         }
 
-
-        const reply =
-            await routeToAI(provider, message);
-
+        const reply = await routeToAI(
+            provider,
+            message
+        );
 
         res.json({
-
             success: true,
-
             provider: provider,
-
             reply: reply
-
         });
 
-    }
-
-    catch (error) {
-
+    } catch (error) {
         console.error(
             "AI Router Error:",
             error.message
         );
 
         res.status(500).json({
-
             success: false,
-
             error:
                 error.message ||
                 "AI provider request failed."
-
         });
-
     }
-
 });
 
-
-/* -----------------------------------------------
+/* =========================
    SERVER
------------------------------------------------- */
+========================= */
 
 app.listen(PORT, "0.0.0.0", () => {
-
     console.log(
         `Shiva 2.0 Backend running on port ${PORT}`
     );
-
 });
+
+
