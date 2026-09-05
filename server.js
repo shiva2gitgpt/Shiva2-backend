@@ -1,385 +1,194 @@
-const express = require("express");
-const cors = require("cors");
+const express=require("express");
+const cors=require("cors");
 
-const app = express();
-
-const PORT = process.env.PORT || 3000;
+const app=express();
+const PORT=process.env.PORT||3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({limit:"1mb"}));
 
-const PROVIDERS = {
-    gemini: {
-        name: "Gemini",
-        apiKey: process.env.GEMINI_API_KEY
-    },
-    groq: {
-        name: "Groq",
-        apiKey: process.env.GROQ_API_KEY
-    },
-    mistral: {
-        name: "Mistral",
-        apiKey: process.env.MISTRAL_API_KEY
-    },
-    qwen: {
-        name: "Qwen",
-        apiKey: process.env.QWEN_API_KEY
-    }
+const PROVIDERS={
+ gemini:{name:"Gemini",apiKey:process.env.GEMINI_API_KEY},
+ groq:{name:"Groq",apiKey:process.env.GROQ_API_KEY}
 };
 
-function checkProvider(provider) {
-    if (!PROVIDERS[provider]) {
-        return {
-            valid: false,
-            message: `Unknown provider: ${provider}`
-        };
-    }
+const SHIVA_IDENTITY=`
+You are Shiva AI, the AI assistant inside the Shiva 2.0 platform.
 
-    if (!PROVIDERS[provider].apiKey) {
-        return {
-            valid: false,
-            message: `${PROVIDERS[provider].name} API key is not configured.`
-        };
-    }
+Identity:
+- You are part of Shiva 2.0.
+- You were developed by SHIVA.
+- SHIVA is the developer/creator of the Shiva 2.0 platform.
+- The currently selected provider is only your underlying AI engine.
+- If the user asks who developed or created you, say that you are Shiva AI developed by SHIVA.
+- Do not identify OpenAI, Google, Groq, or another provider as the developer of Shiva AI.
+- If the user mentions the selected provider name such as "Groq" or "Gemini", understand that they normally mean the currently selected AI engine unless the conversation clearly indicates otherwise.
+- Keep your Shiva AI identity consistent even when the underlying provider changes.
+- Be helpful, accurate and natural.
+`;
 
-    return { valid: true };
+function checkProvider(provider){
+ if(!PROVIDERS[provider])
+  return {valid:false,message:`Unknown provider: ${provider}`};
+
+ if(!PROVIDERS[provider].apiKey)
+  return {valid:false,message:`${PROVIDERS[provider].name} API key is not configured.`};
+
+ return {valid:true};
 }
 
-/* =========================
-   GEMINI
-   Diagnostic version
-   Model:
-   gemini-3.8-flash
-========================= */
+function cleanHistory(history){
+ if(!Array.isArray(history))return [];
 
-async function callGemini(message) {
-    const response = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/interactions",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "x-goog-api-key": process.env.GEMINI_API_KEY
-            },
-            body: JSON.stringify({
-                model: "gemini-3.8-flash",
-                input: message
-            })
-        }
-    );
-
-    const rawText = await response.text();
-
-    console.log("========== GEMINI RAW RESPONSE ==========");
-    console.log(rawText);
-    console.log("==========================================");
-
-    let data;
-
-    try {
-        data = JSON.parse(rawText);
-    } catch {
-        throw new Error(
-            `Gemini returned non-JSON response: ${rawText.slice(0, 500)}`
-        );
-    }
-
-    if (!response.ok) {
-        throw new Error(
-            data?.error?.message ||
-            data?.message ||
-            `Gemini API request failed with status ${response.status}.`
-        );
-    }
-
-    /*
-      Current Interactions API structure:
-
-      {
-        "steps": [
-          {
-            "type": "model_output",
-            "content": [
-              {
-                "type": "text",
-                "text": "..."
-              }
-            ]
-          }
-        ]
-      }
-    */
-
-    const text = Array.isArray(data?.steps)
-        ? data.steps
-            .filter(step => step?.type === "model_output")
-            .flatMap(step => Array.isArray(step?.content) ? step.content : [])
-            .filter(item => item?.type === "text")
-            .map(item => item?.text || "")
-            .join("")
-        : "";
-
-    if (!text) {
-        throw new Error(
-            "Gemini response received, but no text was found. Check Render logs for GEMINI RAW RESPONSE."
-        );
-    }
-
-    return text;
+ return history
+  .filter(m=>m&&["user","assistant"].includes(m.role)&&typeof m.content==="string")
+  .slice(-30)
+  .map(m=>({role:m.role,content:m.content.slice(0,12000)}));
 }
 
-/* =========================
-   GROQ
-   Model:
-   openai/gpt-oss-120b
-========================= */
+async function callGemini(message,history){
+ const transcript=history.length
+  ? history.map(m=>`${m.role==="user"?"SHIVA":"SHIVA AI"}: ${m.content}`).join("\n\n")
+  : "";
 
-async function callGroq(message) {
-    const response = await fetch(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: "openai/gpt-oss-120b",
-                messages: [
-                    {
-                        role: "user",
-                        content: message
-                    }
-                ]
-            })
-        }
-    );
+ const input=transcript
+  ? `${transcript}\n\nSHIVA: ${message}`
+  : message;
 
-    const data = await response.json();
+ const response=await fetch(
+  "https://generativelanguage.googleapis.com/v1beta/interactions",
+  {
+   method:"POST",
+   headers:{
+    "Content-Type":"application/json",
+    "x-goog-api-key":process.env.GEMINI_API_KEY
+   },
+   body:JSON.stringify({
+    model:"gemini-3.8-flash",
+    system_instruction:SHIVA_IDENTITY,
+    input
+   })
+  }
+ );
 
-    if (!response.ok) {
-        throw new Error(
-            data?.error?.message ||
-            "Groq API request failed."
-        );
-    }
+ const data=await response.json();
 
-    const text = data?.choices?.[0]?.message?.content;
+ if(!response.ok)
+  throw new Error(data?.error?.message||data?.message||"Gemini API request failed.");
 
-    if (!text) {
-        throw new Error("Groq returned an empty response.");
-    }
+ const text=
+  data?.steps
+   ?.filter(x=>x?.type==="model_output")
+   ?.flatMap(x=>x?.content||[])
+   ?.filter(x=>x?.type==="text")
+   ?.map(x=>x?.text||"")
+   ?.join("")||
+  data?.output_text||
+  "";
 
-    return text;
+ if(!text)throw new Error("Gemini returned an empty response.");
+
+ return text;
 }
 
-/* =========================
-   MISTRAL
-   Kept temporarily for backend compatibility
-   Website provider will be removed later.
-========================= */
+async function callGroq(message,history){
+ const messages=[
+  {role:"system",content:SHIVA_IDENTITY},
+  ...history,
+  {role:"user",content:message}
+ ];
 
-async function callMistral(message) {
-    const response = await fetch(
-        "https://api.mistral.ai/v1/chat/completions",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${process.env.MISTRAL_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: "mistral-small-2603",
-                messages: [
-                    {
-                        role: "user",
-                        content: message
-                    }
-                ]
-            })
-        }
-    );
+ const response=await fetch(
+  "https://api.groq.com/openai/v1/chat/completions",
+  {
+   method:"POST",
+   headers:{
+    "Content-Type":"application/json",
+    "Authorization":`Bearer ${process.env.GROQ_API_KEY}`
+   },
+   body:JSON.stringify({
+    model:"openai/gpt-oss-120b",
+    messages
+   })
+  }
+ );
 
-    const data = await response.json();
+ const data=await response.json();
 
-    if (!response.ok) {
-        throw new Error(
-            data?.message ||
-            data?.error?.message ||
-            "Mistral API request failed."
-        );
-    }
+ if(!response.ok)
+  throw new Error(data?.error?.message||"Groq API request failed.");
 
-    const text = data?.choices?.[0]?.message?.content;
+ const text=data?.choices?.[0]?.message?.content;
 
-    if (!text) {
-        throw new Error("Mistral returned an empty response.");
-    }
+ if(!text)throw new Error("Groq returned an empty response.");
 
-    return text;
+ return text;
 }
 
-/* =========================
-   QWEN
-   Kept temporarily for backend compatibility.
-   Website provider will be removed.
-========================= */
-
-async function callQwen(message) {
-    const response = await fetch(
-        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${process.env.QWEN_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: "qwen3.8-27b",
-                messages: [
-                    {
-                        role: "user",
-                        content: message
-                    }
-                ]
-            })
-        }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-        throw new Error(
-            data?.error?.message ||
-            data?.message ||
-            "Qwen API request failed."
-        );
-    }
-
-    const text = data?.choices?.[0]?.message?.content;
-
-    if (!text) {
-        throw new Error("Qwen returned an empty response.");
-    }
-
-    return text;
+async function routeToAI(provider,message,history){
+ switch(provider){
+  case"gemini":return callGemini(message,history);
+  case"groq":return callGroq(message,history);
+  default:throw new Error(`Unsupported provider: ${provider}`);
+ }
 }
 
-/* =========================
-   AI ROUTER
-========================= */
-
-async function routeToAI(provider, message) {
-    switch (provider) {
-        case "gemini":
-            return await callGemini(message);
-
-        case "groq":
-            return await callGroq(message);
-
-        case "mistral":
-            return await callMistral(message);
-
-        case "qwen":
-            return await callQwen(message);
-
-        default:
-            throw new Error(
-                `Unsupported provider: ${provider}`
-            );
-    }
-}
-
-/* =========================
-   STATUS
-========================= */
-
-app.get("/api/status", (req, res) => {
-    res.json({
-        success: true,
-        message: "Shiva 2.0 Backend + AI Router is working! 🚀",
-        providers: {
-            gemini: !!process.env.GEMINI_API_KEY,
-            groq: !!process.env.GROQ_API_KEY,
-            mistral: !!process.env.MISTRAL_API_KEY,
-            qwen: !!process.env.QWEN_API_KEY
-        }
-    });
+app.get("/api/status",(req,res)=>{
+ res.json({
+  success:true,
+  message:"Shiva 2.0 Backend + AI Router is working! 🚀",
+  providers:{
+   gemini:!!process.env.GEMINI_API_KEY,
+   groq:!!process.env.GROQ_API_KEY
+  }
+ });
 });
 
-/* =========================
-   MESSAGE
-========================= */
+app.post("/api/message",async(req,res)=>{
+ try{
+  const provider=String(req.body.provider||"gemini").toLowerCase();
+  const message=typeof req.body.message==="string"?req.body.message.trim():"";
+  const history=cleanHistory(req.body.history);
 
-app.post("/api/message", async (req, res) => {
-    try {
-        const provider =
-            String(req.body.provider || "gemini").toLowerCase();
+  if(!message&&req.body.name){
+   return res.json({
+    success:true,
+    message:`Hello ${req.body.name}! Backend received your data. 🚀`
+   });
+  }
 
-        const message =
-            typeof req.body.message === "string"
-                ? req.body.message.trim()
-                : "";
+  if(!message)
+   return res.status(400).json({
+    success:false,
+    error:"Message is required."
+   });
 
-        /* Preserve existing backend test */
-        if (!message && req.body.name) {
-            return res.json({
-                success: true,
-                message:
-                    "Hello " +
-                    req.body.name +
-                    "! Backend received your data. 🚀"
-            });
-        }
+  const check=checkProvider(provider);
 
-        if (!message) {
-            return res.status(400).json({
-                success: false,
-                error: "Message is required."
-            });
-        }
+  if(!check.valid)
+   return res.status(400).json({
+    success:false,
+    error:check.message
+   });
 
-        const providerCheck = checkProvider(provider);
+  const reply=await routeToAI(provider,message,history);
 
-        if (!providerCheck.valid) {
-            return res.status(400).json({
-                success: false,
-                error: providerCheck.message
-            });
-        }
+  res.json({
+   success:true,
+   provider,
+   reply
+  });
 
-        const reply = await routeToAI(
-            provider,
-            message
-        );
+ }catch(error){
+  console.error("AI Router Error:",error.message);
 
-        res.json({
-            success: true,
-            provider: provider,
-            reply: reply
-        });
-
-    } catch (error) {
-        console.error(
-            "AI Router Error:",
-            error.message
-        );
-
-        res.status(500).json({
-            success: false,
-            error:
-                error.message ||
-                "AI provider request failed."
-        });
-    }
+  res.status(500).json({
+   success:false,
+   error:error.message||"AI provider request failed."
+  });
+ }
 });
 
-/* =========================
-   SERVER
-========================= */
-
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(
-        `Shiva 2.0 Backend running on port ${PORT}`
-    );
+app.listen(PORT,"0.0.0.0",()=>{
+ console.log(`Shiva 2.0 Backend running on port ${PORT}`);
 });
