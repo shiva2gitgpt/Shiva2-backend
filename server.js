@@ -47,9 +47,9 @@ function checkProvider(provider) {
 
 /* =========================
    GEMINI
-   Current model:
+   Diagnostic version
+   Model:
    gemini-3.8-flash
-   Interactions API
 ========================= */
 
 async function callGemini(message) {
@@ -68,26 +68,61 @@ async function callGemini(message) {
         }
     );
 
-    const data = await response.json();
+    const rawText = await response.text();
+
+    console.log("========== GEMINI RAW RESPONSE ==========");
+    console.log(rawText);
+    console.log("==========================================");
+
+    let data;
+
+    try {
+        data = JSON.parse(rawText);
+    } catch {
+        throw new Error(
+            `Gemini returned non-JSON response: ${rawText.slice(0, 500)}`
+        );
+    }
 
     if (!response.ok) {
         throw new Error(
             data?.error?.message ||
             data?.message ||
-            "Gemini API request failed."
+            `Gemini API request failed with status ${response.status}.`
         );
     }
 
-    const text =
-        data?.outputs
-            ?.filter(item => item?.type === "text")
-            ?.map(item => item?.text)
-            ?.join("") ||
-        data?.output_text ||
-        "";
+    /*
+      Current Interactions API structure:
+
+      {
+        "steps": [
+          {
+            "type": "model_output",
+            "content": [
+              {
+                "type": "text",
+                "text": "..."
+              }
+            ]
+          }
+        ]
+      }
+    */
+
+    const text = Array.isArray(data?.steps)
+        ? data.steps
+            .filter(step => step?.type === "model_output")
+            .flatMap(step => Array.isArray(step?.content) ? step.content : [])
+            .filter(item => item?.type === "text")
+            .map(item => item?.text || "")
+            .join("")
+        : "";
 
     if (!text) {
-        throw new Error("Gemini returned an empty response.");
+        throw new Error(
+            "Gemini response received, but no text was found. Check Render logs for GEMINI RAW RESPONSE."
+        );
     }
 
     return text;
@@ -95,7 +130,7 @@ async function callGemini(message) {
 
 /* =========================
    GROQ
-   Current model:
+   Model:
    openai/gpt-oss-120b
 ========================= */
 
@@ -140,8 +175,8 @@ async function callGroq(message) {
 
 /* =========================
    MISTRAL
-   Current model:
-   mistral-small-2603
+   Kept temporarily for backend compatibility
+   Website provider will be removed later.
 ========================= */
 
 async function callMistral(message) {
@@ -186,11 +221,8 @@ async function callMistral(message) {
 
 /* =========================
    QWEN
-   Current Singapore model:
-   qwen3.8-27b
-
-   Existing international endpoint
-   remains supported.
+   Kept temporarily for backend compatibility.
+   Website provider will be removed.
 ========================= */
 
 async function callQwen(message) {
@@ -351,5 +383,3 @@ app.listen(PORT, "0.0.0.0", () => {
         `Shiva 2.0 Backend running on port ${PORT}`
     );
 });
-
-
