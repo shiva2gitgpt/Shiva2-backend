@@ -1,339 +1,2035 @@
-const express=require("express");
-const cors=require("cors");
+/*
+  SHIVA 2.0 — Authentication + AI Backend
+  File: auth server.js
 
-const app=express();
-const PORT=process.env.PORT||3000;
+  Stage 1:
+  - Signup
+  - Login
+  - Persistent sessions
+  - Logout
+  - Multi-account/session management
+  - Account profile
+  - Password change
+  - Password reset foundation
+  - User-scoped chats
+  - Shiva Memory
+  - Projects
+  - Incognito isolation
+  - Gemini + Groq AI Router
+  - Common Shiva AI identity
+*/
+
+const express = require("express");
+const cors = require("cors");
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+
+const app = express();
+
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json({limit:"1mb"}));
+app.use(express.json({ limit: "2mb" }));
 
-const PROVIDERS={
- gemini:{
-  name:"Gemini",
-  apiKey:process.env.GEMINI_API_KEY
- },
- groq:{
-  name:"Groq",
-  apiKey:process.env.GROQ_API_KEY
- }
-};
+// --------------------------------------------------
+// STORAGE
+// --------------------------------------------------
 
-const SHIVA_IDENTITY=`
-You are Shiva AI, the AI assistant inside the Shiva 2.0 platform.
+const DATA_DIR = path.join(__dirname, "data");
+const DATA_FILE = path.join(DATA_DIR, "shiva.json");
 
-Identity:
-- You are part of Shiva 2.0.
-- You were developed by SHIVA.
-- SHIVA is the developer/creator of the Shiva 2.0 platform.
-- The currently selected provider is only your underlying AI engine.
-- If the user asks who developed or created you, say that you are Shiva AI developed by SHIVA.
-- Do not identify OpenAI, Google, Groq, or another provider as the developer of Shiva AI.
-- If the user mentions the selected provider name such as "Groq" or "Gemini", understand that they normally mean the currently selected AI engine unless the conversation clearly indicates otherwise.
-- Keep your Shiva AI identity consistent even when the underlying provider changes.
-- Be helpful, accurate and natural.
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function defaultDatabase() {
+  return {
+    users: [],
+    sessions: [],
+    chats: [],
+    memories: [],
+    projects: [],
+    resetTokens: []
+  };
+}
+
+function loadDatabase() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) {
+      const db = defaultDatabase();
+      saveDatabase(db);
+      return db;
+    }
+
+    const raw = fs.readFileSync(DATA_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    return {
+      ...defaultDatabase(),
+      ...parsed
+    };
+  } catch (error) {
+    console.error("Database load error:", error);
+    return defaultDatabase();
+  }
+}
+
+let db = loadDatabase();
+
+function saveDatabase(database = db) {
+  fs.writeFileSync(
+    DATA_FILE,
+    JSON.stringify(database, null, 2),
+    "utf8"
+  );
+}
+
+// --------------------------------------------------
+// HELPERS
+// --------------------------------------------------
+
+function now() {
+  return new Date().toISOString();
+}
+
+function makeId(prefix = "id") {
+  return `${prefix}_${crypto.randomBytes(16).toString("hex")}`;
+}
+
+function normalizeUsername(username) {
+  return String(username || "").trim().toLowerCase();
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function normalizePhone(phone) {
+  return String(phone || "").trim();
+}
+
+function safeText(value, max = 10000) {
+  return String(value || "").slice(0, max);
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.scryptSync(
+    password,
+    salt,
+    64
+  ).toString("hex");
+
+  return {
+    salt,
+    hash
+  };
+}
+
+function verifyPassword(password, storedHash, salt) {
+  const calculated = crypto.scryptSync(
+    password,
+    salt,
+    64
+  ).toString("hex");
+
+  const a = Buffer.from(calculated, "hex");
+  const b = Buffer.from(storedHash, "hex");
+
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(a, b);
+}
+
+function generateToken(bytes = 48) {
+  return crypto.randomBytes(bytes).toString("hex");
+}
+
+function publicUser(user) {
+  if (!user) return null;
+
+  return {
+    user_id: user.user_id,
+    username: user.username,
+    email: user.email || null,
+    phone: user.phone || null,
+    display_name: user.display_name || user.username,
+    avatar: user.avatar || null,
+    role: user.role || "user",
+    created_at: user.created_at,
+    updated_at: user.updated_at
+  };
+}
+
+function publicSession(session) {
+  return {
+    session_id: session.session_id,
+    user_id: session.user_id,
+    device_name: session.device_name || "Unknown device",
+    created_at: session.created_at,
+    last_seen: session.last_seen,
+    current: false
+  };
+}
+
+// --------------------------------------------------
+// VALIDATION
+// --------------------------------------------------
+
+function validateUsername(username) {
+  const value = String(username || "").trim();
+
+  if (value.length < 4 || value.length > 20) {
+    return "Username must be 4–20 characters.";
+  }
+
+  if (!/^[A-Za-z0-9_@]+$/.test(value)) {
+    return "Username can contain only letters, numbers, _ and @.";
+  }
+
+  if (/^[_@]+$/.test(value)) {
+    return "Username cannot contain only _ or @.";
+  }
+
+  const reserved = [
+    "admin",
+    "administrator",
+    "root",
+    "system",
+    "support",
+    "shiva",
+    "shiva2",
+    "shivaai",
+    "official",
+    "security",
+    "moderator",
+    "moderator",
+    "api",
+    "null",
+    "undefined"
+  ];
+
+  if (reserved.includes(value.toLowerCase())) {
+    return "This username is reserved.";
+  }
+
+  return null;
+}
+
+function validatePassword(password) {
+  const value = String(password || "");
+
+  if (value.length < 5 || value.length > 25) {
+    return "Password must be 5–25 characters.";
+  }
+
+  return null;
+}
+
+function validateEmail(email) {
+  if (!email) return null;
+
+  const value = normalizeEmail(email);
+
+  if (value.length > 254) {
+    return "Email is too long.";
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    return "Invalid email address.";
+  }
+
+  return null;
+}
+
+// --------------------------------------------------
+// AUTHENTICATION
+// --------------------------------------------------
+
+function createSession(userId, req) {
+  const session = {
+    session_id: makeId("sess"),
+    user_id: userId,
+
+    // Persistent session.
+    // No arbitrary 30-day forced expiration.
+    token: generateToken(48),
+
+    device_name:
+      req.body?.device_name ||
+      req.headers["user-agent"] ||
+      "Unknown device",
+
+    created_at: now(),
+    last_seen: now()
+  };
+
+  db.sessions.push(session);
+  saveDatabase();
+
+  return session;
+}
+
+function getTokenFromRequest(req) {
+  const auth = req.headers.authorization || "";
+
+  if (auth.startsWith("Bearer ")) {
+    return auth.slice(7).trim();
+  }
+
+  return req.headers["x-session-token"] || null;
+}
+
+function authenticate(req, res, next) {
+  const token = getTokenFromRequest(req);
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      error: "Authentication required."
+    });
+  }
+
+  const session = db.sessions.find(
+    item => item.token === token
+  );
+
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      error: "Invalid session."
+    });
+  }
+
+  const user = db.users.find(
+    item => item.user_id === session.user_id
+  );
+
+  if (!user) {
+    return res.status(401).json({
+      success: false,
+      error: "Account no longer exists."
+    });
+  }
+
+  session.last_seen = now();
+  saveDatabase();
+
+  req.user = user;
+  req.session = session;
+
+  next();
+}
+
+// --------------------------------------------------
+// SHIVA IDENTITY
+// --------------------------------------------------
+
+const SHIVA_IDENTITY = `
+You are Shiva AI inside Shiva 2.0.
+
+You are part of the Shiva 2.0 platform.
+
+SHIVA is the developer and creator of the Shiva 2.0 platform.
+
+The selected AI provider is only the underlying engine used to generate the response.
+The provider is not the developer or creator of Shiva AI.
+
+If the user asks who developed or created Shiva AI, explain that Shiva AI was developed by SHIVA as part of Shiva 2.0.
+
+Never infer that a person is SHIVA merely because their name or username is Shiva.
+
+Authenticated user identity is determined by the server-side account user_id.
+
+Maintain continuity with the user's authorized context when available.
+
+Do not expose private server secrets, API keys, password hashes, session tokens, or internal authentication data.
 `;
 
-function checkProvider(provider){
+// --------------------------------------------------
+// PROVIDERS
+// --------------------------------------------------
 
- if(!PROVIDERS[provider])
-  return {
-   valid:false,
-   message:`Unknown provider: ${provider}`
-  };
-
- if(!PROVIDERS[provider].apiKey)
-  return {
-   valid:false,
-   message:`${PROVIDERS[provider].name} API key is not configured.`
-  };
-
- return {valid:true};
-
-}
-
-function cleanHistory(history){
-
- if(!Array.isArray(history))
-  return [];
-
- return history
-  .filter(
-   m=>
-    m &&
-    ["user","assistant"].includes(m.role) &&
-    typeof m.content==="string"
-  )
-  .slice(-30)
-  .map(
-   m=>({
-    role:m.role,
-    content:m.content.slice(0,12000)
-   })
-  );
-
-}
-
-async function callGemini(message,history){
-
- const transcript=
-  history.length
-  ?history
-   .map(
-    m=>
-     `${m.role==="user"?"SHIVA":"SHIVA AI"}: ${m.content}`
-   )
-   .join("\n\n")
-  :"";
-
- const input=
-  transcript
-  ?`${transcript}\n\nSHIVA: ${message}`
-  :message;
-
- const response=await fetch(
-  "https://generativelanguage.googleapis.com/v1beta/interactions",
-  {
-   method:"POST",
-   headers:{
-    "Content-Type":"application/json",
-    "x-goog-api-key":process.env.GEMINI_API_KEY
-   },
-   body:JSON.stringify({
-    model:"gemini-3.8-flash",
-    system_instruction:SHIVA_IDENTITY,
-    input
-   })
-  }
- );
-
- const data=await response.json();
-
- if(!response.ok)
-  throw new Error(
-   data?.error?.message||
-   data?.message||
-   "Gemini API request failed."
-  );
-
- const text=
-  data?.steps
-   ?.filter(x=>x?.type==="model_output")
-   ?.flatMap(x=>x?.content||[])
-   ?.filter(x=>x?.type==="text")
-   ?.map(x=>x?.text||"")
-   ?.join("")||
-  data?.output_text||
-  "";
-
- if(!text)
-  throw new Error(
-   "Gemini returned an empty response."
-  );
-
- return text;
-
-}
-
-async function callGroq(message,history){
-
- const messages=[
-  {
-   role:"system",
-   content:SHIVA_IDENTITY
+const PROVIDERS = {
+  gemini: {
+    name: "Gemini",
+    model: "gemini-3.8-flash"
   },
-  ...history,
-  {
-   role:"user",
-   content:message
+
+  groq: {
+    name: "Groq",
+    model: "openai/gpt-oss-120b"
   }
- ];
+};
 
- const response=await fetch(
-  "https://api.groq.com/openai/v1/chat/completions",
-  {
-   method:"POST",
-   headers:{
-    "Content-Type":"application/json",
-    "Authorization":
-     `Bearer ${process.env.GROQ_API_KEY}`
-   },
-   body:JSON.stringify({
-    model:"openai/gpt-oss-120b",
-    messages
-   })
+function providerAvailable(provider) {
+  if (provider === "gemini") {
+    return Boolean(process.env.GEMINI_API_KEY);
   }
- );
 
- const data=await response.json();
+  if (provider === "groq") {
+    return Boolean(process.env.GROQ_API_KEY);
+  }
 
- if(!response.ok)
-  throw new Error(
-   data?.error?.message||
-   "Groq API request failed."
-  );
-
- const text=
-  data?.choices?.[0]?.message?.content;
-
- if(!text)
-  throw new Error(
-   "Groq returned an empty response."
-  );
-
- return text;
-
+  return false;
 }
 
-async function routeToAI(
- provider,
- message,
- history
-){
+function cleanHistory(history) {
+  if (!Array.isArray(history)) {
+    return [];
+  }
 
- switch(provider){
+  return history
+    .slice(-30)
+    .map(item => ({
+      role:
+        item.role === "assistant"
+          ? "assistant"
+          : "user",
 
-  case"gemini":
-   return callGemini(
-    message,
-    history
-   );
-
-  case"groq":
-   return callGroq(
-    message,
-    history
-   );
-
-  default:
-   throw new Error(
-    `Unsupported provider: ${provider}`
-   );
-
- }
-
+      content: safeText(item.content, 12000)
+    }))
+    .filter(item => item.content.trim());
 }
+
+// --------------------------------------------------
+// GEMINI
+// --------------------------------------------------
+
+async function callGemini(message, history = [], context = "") {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("Gemini provider is not configured.");
+  }
+
+  const contents = [
+    ...cleanHistory(history).map(item => ({
+      role: item.role === "assistant"
+        ? "model"
+        : "user",
+
+      parts: [
+        {
+          text: item.content
+        }
+      ]
+    })),
+
+    {
+      role: "user",
+      parts: [
+        {
+          text: message
+        }
+      ]
+    }
+  ];
+
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/interactions",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey
+      },
+
+      body: JSON.stringify({
+        model: PROVIDERS.gemini.model,
+
+        system_instruction: {
+          parts: [
+            {
+              text: `${SHIVA_IDENTITY}\n\n${context}`
+            }
+          ]
+        },
+
+        input: contents
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    const error = new Error(
+      data?.error?.message ||
+      "Gemini request failed."
+    );
+
+    error.status = response.status;
+    error.provider = "gemini";
+
+    throw error;
+  }
+
+  const output =
+    data?.outputs?.[0]?.text ||
+    data?.output_text ||
+    data?.response?.text ||
+    data?.text ||
+    "";
+
+  if (!output) {
+    throw new Error("Gemini returned an empty response.");
+  }
+
+  return output;
+}
+
+// --------------------------------------------------
+// GROQ
+// --------------------------------------------------
+
+async function callGroq(message, history = [], context = "") {
+  const apiKey = process.env.GROQ_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("Groq provider is not configured.");
+  }
+
+  const messages = [
+    {
+      role: "system",
+      content: `${SHIVA_IDENTITY}\n\n${context}`
+    },
+
+    ...cleanHistory(history),
+
+    {
+      role: "user",
+      content: message
+    }
+  ];
+
+  const response = await fetch(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+
+      body: JSON.stringify({
+        model: PROVIDERS.groq.model,
+        messages
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    const error = new Error(
+      data?.error?.message ||
+      "Groq request failed."
+    );
+
+    error.status = response.status;
+    error.provider = "groq";
+
+    throw error;
+  }
+
+  const output =
+    data?.choices?.[0]?.message?.content || "";
+
+  if (!output) {
+    throw new Error("Groq returned an empty response.");
+  }
+
+  return output;
+}
+
+// --------------------------------------------------
+// AI ROUTER
+// --------------------------------------------------
+
+async function routeToAI({
+  provider,
+  message,
+  history,
+  context
+}) {
+  if (!PROVIDERS[provider]) {
+    throw new Error("Unsupported AI provider.");
+  }
+
+  if (!providerAvailable(provider)) {
+    throw new Error(
+      `${PROVIDERS[provider].name} is currently unavailable.`
+    );
+  }
+
+  if (provider === "gemini") {
+    return callGemini(
+      message,
+      history,
+      context
+    );
+  }
+
+  if (provider === "groq") {
+    return callGroq(
+      message,
+      history,
+      context
+    );
+  }
+
+  throw new Error("Provider router error.");
+}
+
+// --------------------------------------------------
+// AUTH ROUTES
+// --------------------------------------------------
+
+app.post("/api/auth/signup", (req, res) => {
+  try {
+    const {
+      username,
+      email,
+      phone,
+      password,
+      display_name,
+      device_name
+    } = req.body || {};
+
+    const usernameError = validateUsername(username);
+
+    if (usernameError) {
+      return res.status(400).json({
+        success: false,
+        error: usernameError
+      });
+    }
+
+    const passwordError = validatePassword(password);
+
+    if (passwordError) {
+      return res.status(400).json({
+        success: false,
+        error: passwordError
+      });
+    }
+
+    const emailError = validateEmail(email);
+
+    if (emailError) {
+      return res.status(400).json({
+        success: false,
+        error: emailError
+      });
+    }
+
+    if (!email && !phone) {
+      return res.status(400).json({
+        success: false,
+        error: "Email or phone is required."
+      });
+    }
+
+    const normalizedUsername =
+      normalizeUsername(username);
+
+    const normalizedEmail =
+      email ? normalizeEmail(email) : null;
+
+    const normalizedPhone =
+      phone ? normalizePhone(phone) : null;
+
+    const usernameExists = db.users.some(
+      user =>
+        normalizeUsername(user.username) ===
+        normalizedUsername
+    );
+
+    if (usernameExists) {
+      return res.status(409).json({
+        success: false,
+        error: "Username is already taken."
+      });
+    }
+
+    if (
+      normalizedEmail &&
+      db.users.some(
+        user =>
+          user.email &&
+          normalizeEmail(user.email) ===
+          normalizedEmail
+      )
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "Email is already registered."
+      });
+    }
+
+    if (
+      normalizedPhone &&
+      db.users.some(
+        user =>
+          user.phone &&
+          normalizePhone(user.phone) ===
+          normalizedPhone
+      )
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "Phone is already registered."
+      });
+    }
+
+    const passwordData =
+      hashPassword(password);
+
+    const user = {
+      user_id: makeId("usr"),
+
+      username: String(username).trim(),
+
+      email: normalizedEmail,
+
+      phone: normalizedPhone,
+
+      display_name:
+        safeText(display_name, 60) ||
+        String(username).trim(),
+
+      avatar: null,
+
+      role: "user",
+
+      password_hash: passwordData.hash,
+      password_salt: passwordData.salt,
+
+      created_at: now(),
+      updated_at: now()
+    };
+
+    db.users.push(user);
+
+    const session =
+      createSession(user.user_id, req);
+
+    return res.status(201).json({
+      success: true,
+      user: publicUser(user),
+      session: {
+        token: session.token,
+        session_id: session.session_id
+      }
+    });
+  } catch (error) {
+    console.error("Signup error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Signup failed."
+    });
+  }
+});
+
+// --------------------------------------------------
+// LOGIN
+// --------------------------------------------------
+
+app.post("/api/auth/login", (req, res) => {
+  try {
+    const {
+      identifier,
+      password,
+      device_name
+    } = req.body || {};
+
+    if (!identifier || !password) {
+      return res.status(400).json({
+        success: false,
+        error: "Identifier and password are required."
+      });
+    }
+
+    const value =
+      String(identifier).trim();
+
+    const user = db.users.find(item => {
+      const usernameMatch =
+        normalizeUsername(item.username) ===
+        normalizeUsername(value);
+
+      const emailMatch =
+        item.email &&
+        normalizeEmail(item.email) ===
+        normalizeEmail(value);
+
+      const phoneMatch =
+        item.phone &&
+        normalizePhone(item.phone) ===
+        normalizePhone(value);
+
+      return (
+        usernameMatch ||
+        emailMatch ||
+        phoneMatch
+      );
+    });
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: "Invalid login credentials."
+      });
+    }
+
+    const valid =
+      verifyPassword(
+        password,
+        user.password_hash,
+        user.password_salt
+      );
+
+    if (!valid) {
+      return res.status(401).json({
+        success: false,
+        error: "Invalid login credentials."
+      });
+    }
+
+    const session =
+      createSession(user.user_id, {
+        body: {
+          device_name:
+            device_name ||
+            req.headers["user-agent"]
+        },
+        headers: req.headers
+      });
+
+    return res.json({
+      success: true,
+
+      user: publicUser(user),
+
+      session: {
+        token: session.token,
+        session_id: session.session_id
+      }
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Login failed."
+    });
+  }
+});
+
+// --------------------------------------------------
+// CURRENT USER
+// --------------------------------------------------
+
+app.get("/api/auth/me", authenticate, (req, res) => {
+  return res.json({
+    success: true,
+
+    user: publicUser(req.user),
+
+    session: {
+      session_id: req.session.session_id,
+      created_at: req.session.created_at,
+      last_seen: req.session.last_seen
+    }
+  });
+});
+
+// --------------------------------------------------
+// LOGOUT
+// --------------------------------------------------
+
+app.post("/api/auth/logout", authenticate, (req, res) => {
+  const sessionId =
+    req.session.session_id;
+
+  db.sessions =
+    db.sessions.filter(
+      item =>
+        item.session_id !== sessionId
+    );
+
+  saveDatabase();
+
+  return res.json({
+    success: true,
+    message: "Logged out successfully."
+  });
+});
+
+// --------------------------------------------------
+// ACCOUNT SESSIONS
+// --------------------------------------------------
 
 app.get(
- "/api/status",
- (req,res)=>{
+  "/api/account/sessions",
+  authenticate,
+  (req, res) => {
+    const sessions =
+      db.sessions
+        .filter(
+          item =>
+            item.user_id ===
+            req.user.user_id
+        )
+        .map(item => ({
+          ...publicSession(item),
 
-  res.json({
-   success:true,
-   message:
-    "Shiva 2.0 Backend + AI Router is working! 🚀",
-   providers:{
-    gemini:!!process.env.GEMINI_API_KEY,
-    groq:!!process.env.GROQ_API_KEY
-   }
-  });
+          current:
+            item.session_id ===
+            req.session.session_id
+        }));
 
- }
+    return res.json({
+      success: true,
+      sessions
+    });
+  }
+);
+
+// --------------------------------------------------
+// REVOKE ONE SESSION
+// --------------------------------------------------
+
+app.delete(
+  "/api/account/sessions/:id",
+  authenticate,
+  (req, res) => {
+    const sessionId =
+      req.params.id;
+
+    const target =
+      db.sessions.find(
+        item =>
+          item.session_id ===
+            sessionId &&
+          item.user_id ===
+            req.user.user_id
+      );
+
+    if (!target) {
+      return res.status(404).json({
+        success: false,
+        error: "Session not found."
+      });
+    }
+
+    db.sessions =
+      db.sessions.filter(
+        item =>
+          item.session_id !==
+          sessionId
+      );
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      message: "Session revoked."
+    });
+  }
+);
+
+// --------------------------------------------------
+// LOGOUT ALL OTHER DEVICES
+// --------------------------------------------------
+
+app.post(
+  "/api/account/sessions/logout-others",
+  authenticate,
+  (req, res) => {
+    const currentId =
+      req.session.session_id;
+
+    db.sessions =
+      db.sessions.filter(
+        item =>
+          item.user_id !==
+            req.user.user_id ||
+          item.session_id ===
+            currentId
+      );
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      message:
+        "Other sessions logged out."
+    });
+  }
+);
+
+// --------------------------------------------------
+// ACCOUNT PROFILE
+// --------------------------------------------------
+
+app.put(
+  "/api/account/profile",
+  authenticate,
+  (req, res) => {
+    const {
+      display_name,
+      avatar
+    } = req.body || {};
+
+    if (display_name !== undefined) {
+      req.user.display_name =
+        safeText(display_name, 60) ||
+        req.user.username;
+    }
+
+    if (avatar !== undefined) {
+      req.user.avatar =
+        safeText(avatar, 500);
+    }
+
+    req.user.updated_at = now();
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      user: publicUser(req.user)
+    });
+  }
+);
+
+// --------------------------------------------------
+// CHANGE PASSWORD
+// --------------------------------------------------
+
+app.post(
+  "/api/account/change-password",
+  authenticate,
+  (req, res) => {
+    const {
+      current_password,
+      new_password
+    } = req.body || {};
+
+    if (!current_password || !new_password) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Current and new password are required."
+      });
+    }
+
+    const valid =
+      verifyPassword(
+        current_password,
+        req.user.password_hash,
+        req.user.password_salt
+      );
+
+    if (!valid) {
+      return res.status(401).json({
+        success: false,
+        error: "Current password is incorrect."
+      });
+    }
+
+    const passwordError =
+      validatePassword(new_password);
+
+    if (passwordError) {
+      return res.status(400).json({
+        success: false,
+        error: passwordError
+      });
+    }
+
+    const passwordData =
+      hashPassword(new_password);
+
+    req.user.password_hash =
+      passwordData.hash;
+
+    req.user.password_salt =
+      passwordData.salt;
+
+    req.user.updated_at = now();
+
+    // Security action:
+    // revoke all sessions except
+    // the session currently being used.
+    const currentSessionId =
+      req.session.session_id;
+
+    db.sessions =
+      db.sessions.filter(
+        item =>
+          item.user_id !==
+            req.user.user_id ||
+          item.session_id ===
+            currentSessionId
+      );
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      message:
+        "Password changed successfully."
+    });
+  }
+);
+
+// --------------------------------------------------
+// FORGOT PASSWORD
+// --------------------------------------------------
+
+app.post(
+  "/api/auth/forgot-password",
+  (req, res) => {
+    const {
+      identifier
+    } = req.body || {};
+
+    if (!identifier) {
+      return res.status(400).json({
+        success: false,
+        error: "Identifier is required."
+      });
+    }
+
+    const value =
+      String(identifier).trim();
+
+    const user = db.users.find(item => {
+      return (
+        normalizeUsername(item.username) ===
+          normalizeUsername(value) ||
+
+        (
+          item.email &&
+          normalizeEmail(item.email) ===
+            normalizeEmail(value)
+        ) ||
+
+        (
+          item.phone &&
+          normalizePhone(item.phone) ===
+            normalizePhone(value)
+        )
+      );
+    });
+
+    // Do not reveal whether an account exists.
+    if (!user) {
+      return res.json({
+        success: true,
+        message:
+          "If the account exists, recovery instructions will be generated."
+      });
+    }
+
+    const token =
+      generateToken(32);
+
+    const resetToken = {
+      token_id: makeId("reset"),
+      user_id: user.user_id,
+      token,
+      created_at: now(),
+      used: false
+    };
+
+    db.resetTokens.push(resetToken);
+
+    saveDatabase();
+
+    /*
+      DEVELOPMENT FOUNDATION ONLY
+
+      In production this token must be delivered
+      through a verified email/SMS provider.
+
+      Never expose reset tokens in production responses.
+    */
+
+    return res.json({
+      success: true,
+
+      message:
+        "Recovery request created.",
+
+      development_only:
+        process.env.NODE_ENV !== "production"
+          ? {
+              reset_token: token
+            }
+          : undefined
+    });
+  }
+);
+
+// --------------------------------------------------
+// RESET PASSWORD
+// --------------------------------------------------
+
+app.post(
+  "/api/auth/reset-password",
+  (req, res) => {
+    const {
+      token,
+      new_password
+    } = req.body || {};
+
+    if (!token || !new_password) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Reset token and new password are required."
+      });
+    }
+
+    const passwordError =
+      validatePassword(new_password);
+
+    if (passwordError) {
+      return res.status(400).json({
+        success: false,
+        error: passwordError
+      });
+    }
+
+    const resetToken =
+      db.resetTokens.find(
+        item =>
+          item.token === token &&
+          item.used === false
+      );
+
+    if (!resetToken) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid or already used reset token."
+      });
+    }
+
+    const user =
+      db.users.find(
+        item =>
+          item.user_id ===
+          resetToken.user_id
+      );
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        error: "Account not found."
+      });
+    }
+
+    const passwordData =
+      hashPassword(new_password);
+
+    user.password_hash =
+      passwordData.hash;
+
+    user.password_salt =
+      passwordData.salt;
+
+    user.updated_at = now();
+
+    resetToken.used = true;
+
+    // Password reset revokes all active sessions.
+    db.sessions =
+      db.sessions.filter(
+        item =>
+          item.user_id !==
+          user.user_id
+      );
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      message:
+        "Password reset successfully. Please log in again."
+    });
+  }
+);
+
+// --------------------------------------------------
+// CHATS
+// --------------------------------------------------
+
+app.get(
+  "/api/chats",
+  authenticate,
+  (req, res) => {
+    const mode =
+      req.query.mode;
+
+    const provider =
+      req.query.provider;
+
+    let chats =
+      db.chats.filter(
+        chat =>
+          chat.user_id ===
+          req.user.user_id
+      );
+
+    if (mode) {
+      chats =
+        chats.filter(
+          chat =>
+            chat.mode === mode
+        );
+    }
+
+    if (provider) {
+      chats =
+        chats.filter(
+          chat =>
+            chat.provider ===
+            provider
+        );
+    }
+
+    chats.sort(
+      (a, b) =>
+        new Date(b.updated_at) -
+        new Date(a.updated_at)
+    );
+
+    return res.json({
+      success: true,
+      chats
+    });
+  }
+);
+
+// --------------------------------------------------
+// CREATE CHAT
+// --------------------------------------------------
+
+app.post(
+  "/api/chats",
+  authenticate,
+  (req, res) => {
+    const {
+      mode = "unified",
+      provider = "gemini",
+      title = "New Chat",
+      messages = [],
+      incognito = false
+    } = req.body || {};
+
+    // Incognito chats must never
+    // enter normal persistent storage.
+    if (incognito) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Incognito chats are not persisted."
+      });
+    }
+
+    if (
+      mode !== "unified" &&
+      mode !== "split"
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid chat mode."
+      });
+    }
+
+    if (!PROVIDERS[provider]) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid provider."
+      });
+    }
+
+    const chat = {
+      chat_id: makeId("chat"),
+
+      user_id:
+        req.user.user_id,
+
+      mode,
+
+      provider,
+
+      title:
+        safeText(title, 120) ||
+        "New Chat",
+
+      messages:
+        Array.isArray(messages)
+          ? messages.slice(-100)
+          : [],
+
+      created_at: now(),
+      updated_at: now()
+    };
+
+    db.chats.push(chat);
+
+    saveDatabase();
+
+    return res.status(201).json({
+      success: true,
+      chat
+    });
+  }
+);
+
+// --------------------------------------------------
+// UPDATE CHAT
+// --------------------------------------------------
+
+app.put(
+  "/api/chats/:id",
+  authenticate,
+  (req, res) => {
+    const chat =
+      db.chats.find(
+        item =>
+          item.chat_id ===
+            req.params.id &&
+          item.user_id ===
+            req.user.user_id
+      );
+
+    if (!chat) {
+      return res.status(404).json({
+        success: false,
+        error: "Chat not found."
+      });
+    }
+
+    const {
+      title,
+      mode,
+      provider,
+      messages
+    } = req.body || {};
+
+    if (title !== undefined) {
+      chat.title =
+        safeText(title, 120);
+    }
+
+    if (
+      mode === "unified" ||
+      mode === "split"
+    ) {
+      chat.mode = mode;
+    }
+
+    if (provider !== undefined) {
+      if (!PROVIDERS[provider]) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid provider."
+        });
+      }
+
+      chat.provider = provider;
+    }
+
+    if (Array.isArray(messages)) {
+      chat.messages =
+        messages.slice(-100);
+    }
+
+    chat.updated_at = now();
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      chat
+    });
+  }
+);
+
+// --------------------------------------------------
+// DELETE CHAT
+// --------------------------------------------------
+
+app.delete(
+  "/api/chats/:id",
+  authenticate,
+  (req, res) => {
+    const before =
+      db.chats.length;
+
+    db.chats =
+      db.chats.filter(
+        chat =>
+          !(
+            chat.chat_id ===
+              req.params.id &&
+            chat.user_id ===
+              req.user.user_id
+          )
+      );
+
+    if (before === db.chats.length) {
+      return res.status(404).json({
+        success: false,
+        error: "Chat not found."
+      });
+    }
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      message: "Chat deleted."
+    });
+  }
+);
+
+// --------------------------------------------------
+// SHIVA MEMORY
+// --------------------------------------------------
+
+app.get(
+  "/api/memory",
+  authenticate,
+  (req, res) => {
+    const memories =
+      db.memories.filter(
+        item =>
+          item.user_id ===
+          req.user.user_id
+      );
+
+    return res.json({
+      success: true,
+      memories
+    });
+  }
 );
 
 app.post(
- "/api/message",
- async(req,res)=>{
+  "/api/memory",
+  authenticate,
+  (req, res) => {
+    const {
+      content,
+      category = "general"
+    } = req.body || {};
 
-  try{
+    if (!content) {
+      return res.status(400).json({
+        success: false,
+        error: "Memory content is required."
+      });
+    }
 
-   const provider=
-    String(
-     req.body.provider||"gemini"
-    ).toLowerCase();
+    const memory = {
+      memory_id: makeId("mem"),
 
-   const mode=
-    String(
-     req.body.mode||"unified"
-    ).toLowerCase();
+      user_id:
+        req.user.user_id,
 
-   const message=
-    typeof req.body.message==="string"
-    ?req.body.message.trim()
-    :"";
+      category:
+        safeText(category, 50),
 
-   const history=
-    cleanHistory(req.body.history);
+      content:
+        safeText(content, 5000),
 
-   if(!message&&req.body.name){
+      created_at: now(),
+      updated_at: now()
+    };
 
-    return res.json({
-     success:true,
-     message:
-      `Hello ${req.body.name}! Backend received your data. 🚀`
+    db.memories.push(memory);
+
+    saveDatabase();
+
+    return res.status(201).json({
+      success: true,
+      memory
     });
-
-   }
-
-   if(!message){
-
-    return res.status(400).json({
-     success:false,
-     error:"Message is required."
-    });
-
-   }
-
-   if(
-    !["unified","split"].includes(mode)
-   ){
-
-    return res.status(400).json({
-     success:false,
-     error:
-      "Unknown chat mode: use unified or split."
-    });
-
-   }
-
-   const check=
-    checkProvider(provider);
-
-   if(!check.valid){
-
-    return res.status(400).json({
-     success:false,
-     error:check.message
-    });
-
-   }
-
-   const reply=
-    await routeToAI(
-     provider,
-     message,
-     history
-    );
-
-   res.json({
-    success:true,
-    mode,
-    provider,
-    reply
-   });
-
-  }catch(error){
-
-   console.error(
-    "AI Router Error:",
-    error.message
-   );
-
-   res.status(500).json({
-    success:false,
-    error:
-     error.message||
-     "AI provider request failed."
-   });
-
   }
-
- }
 );
 
+app.delete(
+  "/api/memory/:id",
+  authenticate,
+  (req, res) => {
+    const before =
+      db.memories.length;
+
+    db.memories =
+      db.memories.filter(
+        item =>
+          !(
+            item.memory_id ===
+              req.params.id &&
+            item.user_id ===
+              req.user.user_id
+          )
+      );
+
+    if (before === db.memories.length) {
+      return res.status(404).json({
+        success: false,
+        error: "Memory not found."
+      });
+    }
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      message: "Memory deleted."
+    });
+  }
+);
+
+// --------------------------------------------------
+// PROJECTS
+// --------------------------------------------------
+
+app.get(
+  "/api/projects",
+  authenticate,
+  (req, res) => {
+    const projects =
+      db.projects.filter(
+        project =>
+          project.user_id ===
+          req.user.user_id
+      );
+
+    return res.json({
+      success: true,
+      projects
+    });
+  }
+);
+
+app.post(
+  "/api/projects",
+  authenticate,
+  (req, res) => {
+    const {
+      name,
+      description = ""
+    } = req.body || {};
+
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        error: "Project name is required."
+      });
+    }
+
+    const project = {
+      project_id: makeId("proj"),
+
+      user_id:
+        req.user.user_id,
+
+      name:
+        safeText(name, 120),
+
+      description:
+        safeText(description, 1000),
+
+      chats: [],
+      files: [],
+      notes: [],
+      memory: [],
+      progress: [],
+
+      created_at: now(),
+      updated_at: now()
+    };
+
+    db.projects.push(project);
+
+    saveDatabase();
+
+    return res.status(201).json({
+      success: true,
+      project
+    });
+  }
+);
+
+app.put(
+  "/api/projects/:id",
+  authenticate,
+  (req, res) => {
+    const project =
+      db.projects.find(
+        item =>
+          item.project_id ===
+            req.params.id &&
+          item.user_id ===
+            req.user.user_id
+      );
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found."
+      });
+    }
+
+    const {
+      name,
+      description,
+      chats,
+      files,
+      notes,
+      memory,
+      progress
+    } = req.body || {};
+
+    if (name !== undefined) {
+      project.name =
+        safeText(name, 120);
+    }
+
+    if (description !== undefined) {
+      project.description =
+        safeText(description, 1000);
+    }
+
+    if (Array.isArray(chats)) {
+      project.chats = chats;
+    }
+
+    if (Array.isArray(files)) {
+      project.files = files;
+    }
+
+    if (Array.isArray(notes)) {
+      project.notes = notes;
+    }
+
+    if (Array.isArray(memory)) {
+      project.memory = memory;
+    }
+
+    if (Array.isArray(progress)) {
+      project.progress = progress;
+    }
+
+    project.updated_at = now();
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      project
+    });
+  }
+);
+
+app.delete(
+  "/api/projects/:id",
+  authenticate,
+  (req, res) => {
+    const before =
+      db.projects.length;
+
+    db.projects =
+      db.projects.filter(
+        project =>
+          !(
+            project.project_id ===
+              req.params.id &&
+            project.user_id ===
+              req.user.user_id
+          )
+      );
+
+    if (before === db.projects.length) {
+      return res.status(404).json({
+        success: false,
+        error: "Project not found."
+      });
+    }
+
+    saveDatabase();
+
+    return res.json({
+      success: true,
+      message: "Project deleted."
+    });
+  }
+);
+
+// --------------------------------------------------
+// AI MESSAGE
+// --------------------------------------------------
+
+app.post(
+  "/api/message",
+  authenticate,
+  async (req, res) => {
+    try {
+      const {
+        mode = "unified",
+        provider = "gemini",
+        message,
+        history = [],
+        memory = [],
+        project_context = "",
+        incognito = false
+      } = req.body || {};
+
+      if (!message) {
+        return res.status(400).json({
+          success: false,
+          error: "Message is required."
+        });
+      }
+
+      if (!PROVIDERS[provider]) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid provider."
+        });
+      }
+
+      /*
+        Incognito requests are processed normally,
+        but their long-term memory/project context
+        is not automatically included.
+      */
+
+      const safeMemory =
+        incognito
+          ? []
+          : Array.isArray(memory)
+            ? memory.slice(-30)
+            : [];
+
+      const memoryContext =
+        safeMemory.length
+          ? `Authorized Shiva Memory:\n${safeMemory
+              .map(item =>
+                typeof item === "string"
+                  ? item
+                  : item.content || ""
+              )
+              .filter(Boolean)
+              .join("\n")}`
+          : "";
+
+      const context = [
+        `Authenticated user_id: ${req.user.user_id}`,
+
+        `Username: ${req.user.username}`,
+
+        `AI mode: ${mode}`,
+
+        `Selected underlying provider: ${provider}`,
+
+        incognito
+          ? "Current conversation is Incognito. Do not save or infer long-term memory from this conversation."
+          : "",
+
+        memoryContext,
+
+        incognito
+          ? ""
+          : safeText(project_context, 12000)
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+
+      const answer =
+        await routeToAI({
+          provider,
+          message:
+            safeText(message, 12000),
+          history,
+          context
+        });
+
+      return res.json({
+        success: true,
+
+        provider,
+
+        mode,
+
+        message: answer,
+
+        user_id:
+          req.user.user_id
+      });
+    } catch (error) {
+      console.error(
+        "AI route error:",
+        error
+      );
+
+      const status =
+        error.status === 429
+          ? 429
+          : error.status >= 400 &&
+            error.status < 600
+            ? error.status
+            : 500;
+
+      return res.status(status).json({
+        success: false,
+
+        provider:
+          error.provider || null,
+
+        error:
+          error.message ||
+          "AI request failed."
+      });
+    }
+  }
+);
+
+// --------------------------------------------------
+// BACKEND STATUS
+// --------------------------------------------------
+
+app.get(
+  "/api/status",
+  (req, res) => {
+    return res.json({
+      success: true,
+
+      message:
+        "Shiva 2.0 Backend + AI Router is working! 🚀",
+
+      providers: {
+        gemini:
+          providerAvailable("gemini"),
+
+        groq:
+          providerAvailable("groq")
+      },
+
+      features: {
+        auth: true,
+
+        multiAccount: true,
+
+        persistentSessions: true,
+
+        persistentChats: true,
+
+        memory: true,
+
+        projects: true,
+
+        incognitoIsolation: true
+      },
+
+      note:
+        "Provider availability and provider-side limits remain authoritative."
+    });
+  }
+);
+
+// --------------------------------------------------
+// BACKEND DATA TEST
+// --------------------------------------------------
+
+app.post(
+  "/api/backend-test",
+  (req, res) => {
+    return res.json({
+      success: true,
+
+      message:
+        "Backend received the data successfully.",
+
+      received:
+        req.body || {},
+
+      timestamp: now()
+    });
+  }
+);
+
+// --------------------------------------------------
+// HEALTH
+// --------------------------------------------------
+
+app.get(
+  "/",
+  (req, res) => {
+    return res.json({
+      success: true,
+      message:
+        "Shiva 2.0 backend is online."
+    });
+  }
+);
+
+// --------------------------------------------------
+// 404
+// --------------------------------------------------
+
+app.use(
+  (req, res) => {
+    res.status(404).json({
+      success: false,
+      error: "API route not found."
+    });
+  }
+);
+
+// --------------------------------------------------
+// ERROR HANDLER
+// --------------------------------------------------
+
+app.use(
+  (error, req, res, next) => {
+    console.error(
+      "Unhandled server error:",
+      error
+    );
+
+    res.status(500).json({
+      success: false,
+      error: "Internal server error."
+    });
+  }
+);
+
+// --------------------------------------------------
+// START
+// --------------------------------------------------
+
 app.listen(
- PORT,
- "0.0.0.0",
- ()=>console.log(
-  `Shiva 2.0 Backend running on port ${PORT}`
- )
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `Shiva 2.0 backend running on port ${PORT}`
+    );
+  }
 );
