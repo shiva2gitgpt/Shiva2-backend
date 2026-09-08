@@ -1082,182 +1082,464 @@ app.post(
 );
 
 // --------------------------------------------------
-// FORGOT PASSWORD
+// ACCOUNT RECOVERY
 // --------------------------------------------------
 
-app.post(
-  "/api/auth/forgot-password",
-  (req, res) => {
-    const {
-      identifier
-    } = req.body || {};
+const RECOVERY_OTP_TTL_MS = 10 * 60 * 1000;
+const RECOVERY_MAX_ATTEMPTS = 5;
+const RECOVERY_APPROVAL_TTL_MS = 5 * 60 * 1000;
 
-    if (!identifier) {
-      return res.status(400).json({
-        success: false,
-        error: "Identifier is required."
-      });
-    }
+function generateRecoveryOtp() {
+  return String(crypto.randomInt(100000, 1000000));
+}
 
-    const value =
-      String(identifier).trim();
+function hashRecoveryValue(value) {
+  return crypto
+    .createHash("sha256")
+    .update(String(value))
+    .digest("hex");
+}
 
-    const user = db.users.find(item => {
-      return (
-        normalizeUsername(item.username) ===
-          normalizeUsername(value) ||
+function findRecoveryUser(identifier) {
+  const value = String(identifier || "").trim();
 
-        (
-          item.email &&
-          normalizeEmail(item.email) ===
-            normalizeEmail(value)
-        ) ||
+  return db.users.find(item =>
+    normalizeUsername(item.username) === normalizeUsername(value) ||
+    (item.email && normalizeEmail(item.email) === normalizeEmail(value)) ||
+    (item.phone && normalizePhone(item.phone) === normalizePhone(value))
+  );
+}
 
-        (
-          item.phone &&
-          normalizePhone(item.phone) ===
-            normalizePhone(value)
-        )
-      );
-    });
+function recoveryMethodsForUser(user) {
+  const methods = [];
 
-    // Do not reveal whether an account exists.
-    if (!user) {
-      return res.json({
-        success: true,
-        message:
-          "If the account exists, recovery instructions will be generated."
-      });
-    }
-
-    const token =
-      generateToken(32);
-
-    const resetToken = {
-      token_id: makeId("reset"),
-      user_id: user.user_id,
-      token,
-      created_at: now(),
-      used: false
-    };
-
-    db.resetTokens.push(resetToken);
-
-    saveDatabase();
-
-    /*
-      DEVELOPMENT FOUNDATION ONLY
-
-      In production this token must be delivered
-      through a verified email/SMS provider.
-
-      Never expose reset tokens in production responses.
-    */
-
-    return res.json({
-      success: true,
-
-      message:
-        "Recovery request created.",
-
-      development_only:
-        process.env.NODE_ENV !== "production"
-          ? {
-              reset_token: token
-            }
-          : undefined
+  if (user.email) {
+    methods.push({
+      id: "email",
+      type: "otp",
+      label: "Email OTP",
+      available: true
     });
   }
-);
 
-// --------------------------------------------------
-// RESET PASSWORD
-// --------------------------------------------------
+  if (user.phone) {
+    methods.push({
+      id: "sms",
+      type: "otp",
+      label: "SMS OTP",
+      available: true
+    });
 
-app.post(
-  "/api/auth/reset-password",
-  (req, res) => {
-    const {
-      token,
-      new_password
-    } = req.body || {};
+    methods.push({
+      id: "whatsapp",
+      type: "otp",
+      label: "WhatsApp OTP",
+      available: true
+    });
 
-    if (!token || !new_password) {
-      return res.status(400).json({
-        success: false,
-        error:
-          "Reset token and new password are required."
-      });
-    }
+    methods.push({
+      id: "call",
+      type: "otp",
+      label: "Voice Call OTP",
+      available: true
+    });
+  }
 
-    const passwordError =
-      validatePassword(new_password);
+  if (user.instagram_id) {
+    methods.push({
+      id: "instagram",
+      type: "approval",
+      label: "Instagram Approval",
+      available: true
+    });
+  }
 
-    if (passwordError) {
-      return res.status(400).json({
-        success: false,
-        error: passwordError
-      });
-    }
+  return methods;
+}
 
-    const resetToken =
-      db.resetTokens.find(
-        item =>
-          item.token === token &&
-          item.used === false
-      );
+// Start recovery.
+app.post("/api/auth/recovery/start", (req, res) => {
+  const { identifier } = req.body || {};
 
-    if (!resetToken) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid or already used reset token."
-      });
-    }
+  if (!identifier) {
+    return res.status(400).json({
+      success: false,
+      error: "Identifier is required."
+    });
+  }
 
-    const user =
-      db.users.find(
-        item =>
-          item.user_id ===
-          resetToken.user_id
-      );
+  const user = findRecoveryUser(identifier);
 
-    if (!user) {
-      return res.status(400).json({
-        success: false,
-        error: "Account not found."
-      });
-    }
+  if (!user) {
+    return res.json({
+      success: true,
+      message: "If the account exists, recovery options are available.",
+      methods: []
+    });
+  }
 
-    const passwordData =
-      hashPassword(new_password);
+  const methods = recoveryMethodsForUser(user);
 
-    user.password_hash =
-      passwordData.hash;
+  return res.json({
+    success: true,
+    message: "Recovery options available.",
+    methods
+  });
+});
 
-    user.password_salt =
-      passwordData.salt;
+// Request OTP or approval.
+app.post("/api/auth/recovery/request", (req, res) => {
+  const {
+    identifier,
+    method
+  } = req.body || {};
 
-    user.updated_at = now();
+  if (!identifier || !method) {
+    return res.status(400).json({
+      success: false,
+      error: "Identifier and recovery method are required."
+    });
+  }
 
-    resetToken.used = true;
+  const user = findRecoveryUser(identifier);
 
-    // Password reset revokes all active sessions.
-    db.sessions =
-      db.sessions.filter(
-        item =>
-          item.user_id !==
-          user.user_id
-      );
+  if (!user) {
+    return res.json({
+      success: true,
+      message: "If the account exists, the verification request has been created."
+    });
+  }
 
+  const allowed = ["email", "sms", "whatsapp", "call", "instagram"];
+
+  if (!allowed.includes(method)) {
+    return res.status(400).json({
+      success: false,
+      error: "Unsupported recovery method."
+    });
+  }
+
+  const recoveryId = makeId("recovery");
+
+  if (!db.recoveryRequests) {
+    db.recoveryRequests = [];
+  }
+
+  const request = {
+    recovery_id: recoveryId,
+    user_id: user.user_id,
+    method,
+    type: method === "instagram" ? "approval" : "otp",
+    otp_hash: null,
+    attempts: 0,
+    verified: false,
+    approved: false,
+    used: false,
+    created_at: now(),
+    expires_at: new Date(
+      Date.now() +
+      (
+        method === "instagram"
+          ? RECOVERY_APPROVAL_TTL_MS
+          : RECOVERY_OTP_TTL_MS
+      )
+    ).toISOString()
+  };
+
+  if (request.type === "otp") {
+    const otp = generateRecoveryOtp();
+
+    request.otp_hash = hashRecoveryValue(otp);
+
+    // Development-only visibility.
+    // Real email/SMS/WhatsApp/call providers must deliver this OTP.
+    request.development_otp =
+      process.env.NODE_ENV !== "production"
+        ? otp
+        : undefined;
+  }
+
+  db.recoveryRequests.push(request);
+  saveDatabase();
+
+  return res.json({
+    success: true,
+    recovery_id: recoveryId,
+    method,
+    type: request.type,
+
+    development_only:
+      process.env.NODE_ENV !== "production" &&
+      request.type === "otp"
+        ? {
+            otp: request.development_otp
+          }
+        : undefined,
+
+    message:
+      request.type === "approval"
+        ? "Approval request created."
+        : "Verification code sent."
+  });
+});
+
+// Verify OTP.
+app.post("/api/auth/recovery/verify", (req, res) => {
+  const {
+    recovery_id,
+    otp
+  } = req.body || {};
+
+  if (!recovery_id || !otp) {
+    return res.status(400).json({
+      success: false,
+      error: "Recovery ID and OTP are required."
+    });
+  }
+
+  if (!db.recoveryRequests) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid recovery request."
+    });
+  }
+
+  const request = db.recoveryRequests.find(
+    item =>
+      item.recovery_id === recovery_id &&
+      item.used === false
+  );
+
+  if (!request) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid recovery request."
+    });
+  }
+
+  if (
+    Date.now() >
+    new Date(request.expires_at).getTime()
+  ) {
+    return res.status(400).json({
+      success: false,
+      error: "Verification request expired."
+    });
+  }
+
+  if (request.attempts >= RECOVERY_MAX_ATTEMPTS) {
+    return res.status(429).json({
+      success: false,
+      error: "Too many verification attempts."
+    });
+  }
+
+  request.attempts += 1;
+
+  const valid =
+    hashRecoveryValue(otp) ===
+    request.otp_hash;
+
+  if (!valid) {
     saveDatabase();
 
+    return res.status(400).json({
+      success: false,
+      error: "Invalid verification code."
+    });
+  }
+
+  request.verified = true;
+  request.verified_at = now();
+
+  saveDatabase();
+
+  return res.json({
+    success: true,
+    verified: true,
+    recovery_id
+  });
+});
+
+// Direct approval completion.
+// A trusted external provider/webhook can mark the request approved.
+app.post("/api/auth/recovery/approve", (req, res) => {
+  const {
+    recovery_id
+  } = req.body || {};
+
+  if (!recovery_id || !db.recoveryRequests) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid recovery request."
+    });
+  }
+
+  const request = db.recoveryRequests.find(
+    item =>
+      item.recovery_id === recovery_id &&
+      item.used === false &&
+      item.type === "approval"
+  );
+
+  if (!request) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid approval request."
+    });
+  }
+
+  if (
+    Date.now() >
+    new Date(request.expires_at).getTime()
+  ) {
+    return res.status(400).json({
+      success: false,
+      error: "Approval request expired."
+    });
+  }
+
+  request.approved = true;
+  request.approved_at = now();
+
+  saveDatabase();
+
+  return res.json({
+    success: true,
+    approved: true,
+    recovery_id
+  });
+});
+
+// Set new password after successful verification.
+app.post("/api/auth/recovery/reset-password", (req, res) => {
+  const {
+    recovery_id,
+    new_password
+  } = req.body || {};
+
+  if (!recovery_id || !new_password) {
+    return res.status(400).json({
+      success: false,
+      error: "Recovery ID and new password are required."
+    });
+  }
+
+  if (!db.recoveryRequests) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid recovery request."
+    });
+  }
+
+  const request = db.recoveryRequests.find(
+    item =>
+      item.recovery_id === recovery_id &&
+      item.used === false
+  );
+
+  if (!request) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid recovery request."
+    });
+  }
+
+  if (!request.verified && !request.approved) {
+    return res.status(403).json({
+      success: false,
+      error: "Recovery verification is required first."
+    });
+  }
+
+  const passwordError =
+    validatePassword(new_password);
+
+  if (passwordError) {
+    return res.status(400).json({
+      success: false,
+      error: passwordError
+    });
+  }
+
+  const user = db.users.find(
+    item =>
+      item.user_id === request.user_id
+  );
+
+  if (!user) {
+    return res.status(400).json({
+      success: false,
+      error: "Account not found."
+    });
+  }
+
+  const passwordData =
+    hashPassword(new_password);
+
+  user.password_hash =
+    passwordData.hash;
+
+  user.password_salt =
+    passwordData.salt;
+
+  user.updated_at = now();
+
+  request.used = true;
+  request.completed_at = now();
+
+  // Password recovery invalidates all existing sessions.
+  db.sessions =
+    db.sessions.filter(
+      item =>
+        item.user_id !== user.user_id
+    );
+
+  saveDatabase();
+
+  return res.json({
+    success: true,
+    message:
+      "Password changed successfully. Please log in again."
+  });
+});
+
+// Legacy compatibility endpoint.
+app.post("/api/auth/forgot-password", (req, res) => {
+  const { identifier } = req.body || {};
+
+  if (!identifier) {
+    return res.status(400).json({
+      success: false,
+      error: "Identifier is required."
+    });
+  }
+
+  const user = findRecoveryUser(identifier);
+
+  if (!user) {
     return res.json({
       success: true,
       message:
-        "Password reset successfully. Please log in again."
+        "If the account exists, recovery instructions will be generated."
     });
   }
-);
+
+  return res.json({
+    success: true,
+    message:
+      "Recovery is available. Use /api/auth/recovery/start."
+  });
+});
+
+// Legacy compatibility endpoint.
+app.post("/api/auth/reset-password", (req, res) => {
+  return res.status(410).json({
+    success: false,
+    error:
+      "Legacy password reset endpoint retired. Use the recovery flow."
+  });
+});
 
 // --------------------------------------------------
 // CHATS
