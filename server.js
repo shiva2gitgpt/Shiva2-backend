@@ -450,10 +450,18 @@ async function callGemini(message, history = [], context = "") {
   }
 
   const output =
-    data?.outputs?.[0]?.text ||
     data?.output_text ||
-    data?.response?.text ||
-    data?.text ||
+    data?.steps
+      ?.filter(step => step?.type === "model_output")
+      ?.flatMap(step => Array.isArray(step?.content) ? step.content : [])
+      ?.filter(item => item?.type === "text" && typeof item?.text === "string")
+      ?.map(item => item.text)
+      ?.join("") ||
+    data?.steps
+      ?.flatMap(step => Array.isArray(step?.content) ? step.content : [])
+      ?.filter(item => typeof item?.text === "string")
+      ?.map(item => item.text)
+      ?.join("") ||
     "";
 
   if (!output) {
