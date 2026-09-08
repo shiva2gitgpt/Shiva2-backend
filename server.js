@@ -355,7 +355,7 @@ Do not expose private server secrets, API keys, password hashes, session tokens,
 const PROVIDERS = {
   gemini: {
     name: "Gemini",
-    model: "gemini-3.7-flash"
+    model: "gemini-2.5-flash"
   },
   groq: {
     name: "Groq",
@@ -551,31 +551,47 @@ async function routeToAI({
     throw new Error("Unsupported AI provider.");
   }
 
-  if (!providerAvailable(provider)) {
-    throw new Error(
-      `${PROVIDERS[provider].name} is currently unavailable.`
-    );
-  }
-
   if (provider === "gemini") {
-    return callGemini(
-      message,
-      history,
-      context
+    if (providerAvailable("gemini")) {
+      try {
+        return await callGemini(message, history, context);
+      } catch (error) {
+        const retryable =
+          error.status === 408 ||
+          error.status === 429 ||
+          error.status === 500 ||
+          error.status === 502 ||
+          error.status === 503 ||
+          error.status === 504 ||
+          /high demand|temporar|overload|quota|rate.?limit|resource.?exhaust|unavailable/i.test(
+            error.message || ""
+          );
+
+        if (!retryable) throw error;
+
+        console.warn("Gemini unavailable; falling back to Groq.");
+      }
+    }
+
+    if (providerAvailable("groq")) {
+      return callGroq(message, history, context);
+    }
+
+    throw new Error(
+      "Gemini is temporarily unavailable and no fallback provider is available."
     );
   }
 
   if (provider === "groq") {
-    return callGroq(
-      message,
-      history,
-      context
-    );
+    if (!providerAvailable("groq")) {
+      throw new Error("Groq is currently unavailable.");
+    }
+
+    return callGroq(message, history, context);
   }
 
   throw new Error("Provider router error.");
 }
-
 // --------------------------------------------------
 // AUTH ROUTES
 // --------------------------------------------------
