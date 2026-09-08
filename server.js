@@ -439,13 +439,7 @@ async function callGemini(message, history = [], context = "") {
       body: JSON.stringify({
         model: PROVIDERS.gemini.model,
 
-        system_instruction: {
-          parts: [
-            {
-              text: `${SHIVA_IDENTITY}\n\n${context}`
-            }
-          ]
-        },
+        system_instruction: `${SHIVA_IDENTITY}\n\n${context}`,
 
         input: contents
       })
