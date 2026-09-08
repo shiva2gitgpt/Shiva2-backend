@@ -405,24 +405,13 @@ async function callGemini(message, history = [], context = "") {
 
   const contents = [
     ...cleanHistory(history).map(item => ({
-      role: item.role === "assistant"
-        ? "model"
-        : "user",
-
-      parts: [
-        {
-          text: item.content
-        }
-      ]
+      type: "text",
+      text: `${item.role}: ${item.content}`
     })),
 
     {
-      role: "user",
-      parts: [
-        {
-          text: message
-        }
-      ]
+      type: "text",
+      text: message
     }
   ];
 
