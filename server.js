@@ -355,7 +355,7 @@ Do not expose private server secrets, API keys, password hashes, session tokens,
 const PROVIDERS = {
   gemini: {
     name: "Gemini",
-    model: "gemini-2.5-flash"
+    model: "gemini-3.6-flash"
   },
   groq: {
     name: "Groq",
@@ -563,7 +563,7 @@ async function routeToAI({
           error.status === 502 ||
           error.status === 503 ||
           error.status === 504 ||
-          /high demand|temporar|overload|quota|rate.?limit|resource.?exhaust|unavailable/i.test(
+          /high demand|temporar|overload|quota|rate.?limit|resource.?exhaust|unavailable|no longer available|new users/i.test(
             error.message || ""
           );
 
