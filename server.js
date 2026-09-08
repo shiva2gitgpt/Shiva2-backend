@@ -355,7 +355,7 @@ Do not expose private server secrets, API keys, password hashes, session tokens,
 const PROVIDERS = {
   gemini: {
     name: "Gemini",
-    model: "gemini-3.8-flash"
+    model: "gemini-3.7-flash"
   },
   groq: {
     name: "Groq",
